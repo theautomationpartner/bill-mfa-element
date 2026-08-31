@@ -81,9 +81,17 @@
       font-size: 14px;
     }
 
-    #done, #locked { max-width: 420px; }
-    #done h2, #locked h2 { font-size: 19px; font-weight: 600; margin: 0 0 8px; }
-    #done p, #locked p { margin: 0; color: #5f6368; }
+    #done, #locked, #failed { max-width: 420px; }
+    #done h2, #locked h2, #failed h2 { font-size: 19px; font-weight: 600; margin: 0 0 8px; }
+    #done p, #locked p, #failed p { margin: 0; color: #5f6368; }
+    #failed-detail {
+      margin-top: 14px !important;
+      font-size: 12px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      color: #80868b;
+      word-break: break-word;
+    }
+    #failed-detail:empty { display: none; }
     .check, .cross {
       width: 40px; height: 40px; margin: 0 auto 16px;
       border-radius: 50%;
@@ -130,6 +138,14 @@
   <p id="done-text"></p>
 </section>
 
+<!-- Fallo visible: nunca dejar la pantalla en blanco. -->
+<section id="failed" hidden>
+  <div class="cross" aria-hidden="true">&times;</div>
+  <h2 id="failed-title"></h2>
+  <p id="failed-text"></p>
+  <p id="failed-detail"></p>
+</section>
+
 <!-- Bloqueo por seguridad: se agotaron los intentos. -->
 <section id="locked" hidden>
   <div class="cross" aria-hidden="true">&times;</div>
@@ -155,7 +171,10 @@
     $('btn-label').textContent = on ? 'Loading…' : 'Get Started';
   }
 
+  // Error dentro del paso 1. Si el paso 1 ya no esta en pantalla, el mensaje
+  // seria invisible: en ese caso se muestra la pantalla de fallo completa.
   function showError(message) {
+    if ($('intro').hidden) return mostrarFallo('Something went wrong', message, '');
     $('error').textContent = message;
     setLoading(false);
   }
@@ -170,6 +189,10 @@
     el.classList.add('fade-in');
   }
 
+  // Marca que el flujo ya termino en alguna pantalla final, para que el
+  // vigilante del widget no pise ese resultado.
+  let resuelto = false;
+
   // Titulo y boton se van; queda el widget solo, centrado.
   function mostrarWidget() {
     // El aviso vive dentro de #intro, asi que se va con el.
@@ -178,18 +201,35 @@
   }
 
   function mostrarFinal(titulo, texto) {
+    resuelto = true;
     if (!$('intro').hidden) ocultar($('intro'));
     $('your-div').hidden = true;
+    $('failed').hidden = true;
     $('done-title').textContent = titulo;
     $('done-text').textContent = texto;
     mostrar($('done'));
   }
 
-  // Bloqueo por seguridad: no queda nada que se pueda pulsar.
-  function mostrarBloqueo() {
+  // Fallo con cruz roja. Existe para que NUNCA quede la pantalla en blanco:
+  // si el widget no llega a pintarse, aqui se dice por que.
+  function mostrarFallo(titulo, texto, detalle) {
+    resuelto = true;
     if (!$('intro').hidden) ocultar($('intro'));
     $('your-div').hidden = true;
     $('done').hidden = true;
+    $('failed-title').textContent = titulo;
+    $('failed-text').textContent = texto;
+    $('failed-detail').textContent = detalle || '';
+    mostrar($('failed'));
+  }
+
+  // Bloqueo por seguridad: no queda nada que se pueda pulsar.
+  function mostrarBloqueo() {
+    resuelto = true;
+    if (!$('intro').hidden) ocultar($('intro'));
+    $('your-div').hidden = true;
+    $('done').hidden = true;
+    $('failed').hidden = true;
     mostrar($('locked'));
     if (bootloader) { try { bootloader.destroy('element1'); } catch (err) {} }
   }
@@ -255,13 +295,56 @@
       bootloader.register({ id: 'element1', name: 'mfa', outputs: { onEvent: onWidgetEvent } });
       await bootloader.render('element1', '#your-div');
 
-      // Recien ahora, con el widget ya pintado, se va el paso 1.
-      mostrarWidget();
+      // render() puede resolver sin que BILL haya pintado nada. Se espera a
+      // ver contenido real antes de retirar el titulo y el boton: si se
+      // ocultan antes de tiempo, el usuario se queda mirando una pagina vacia.
+      const pintado = await esperarWidgetPintado();
+      if (resuelto) return;          // el widget ya resolvio por evento
+
+      if (pintado) {
+        mostrarWidget();
+      } else {
+        mostrarFallo(
+          'Bill.com could not load',
+          fingerprintFallo
+            ? 'Bill.com did not authorize this page, so the verification widget ' +
+              'could not start. Please contact TAP support.'
+            : 'The verification widget did not load. Please reload the page, ' +
+              'and contact TAP support if it keeps happening.',
+          detalleDiagnostico());
+      }
     } catch (err) {
       if (err && err.locked) return mostrarBloqueo();
       showError(String(err && err.message ? err.message : err));
     }
   };
+
+  // ¿BILL pinto algo dentro del contenedor? Puede montar en shadow DOM o en un
+  // iframe, asi que no alcanza con mirar innerHTML: se mide tambien el alto.
+  function esperarWidgetPintado(timeoutMs) {
+    const limite = Date.now() + (timeoutMs || 10000);
+    const el = $('your-div');
+    return new Promise((resolve) => {
+      (function revisar() {
+        if (resuelto) return resolve(false);
+        const alto = el.getBoundingClientRect().height;
+        if (el.childElementCount > 0 && (alto > 20 || el.querySelector('iframe'))) {
+          return resolve(true);
+        }
+        if (Date.now() > limite) return resolve(false);
+        setTimeout(revisar, 200);
+      })();
+    });
+  }
+
+  // Pistas para soporte, sin exponer nada sensible.
+  function detalleDiagnostico() {
+    return [
+      'origin ' + location.origin,
+      'env ' + config.env,
+      'events ' + (eventosVistos.join(',') || 'none'),
+    ].join(' · ');
+  }
 
   // Si el servidor ya esta bloqueado, no se muestra ni el boton.
   if (config.locked) {
@@ -282,15 +365,22 @@
   // Lo guardamos como respaldo por si mfaSuccess llega sin el: sin deviceId
   // el rememberMeId no sirve para abrir una sesion trusted.
   let fingerprintDeviceId = null;
+  let fingerprintFallo = false;
+  const eventosVistos = [];
+
   window.addEventListener('bill-bootloader', (e) => {
     const d = e.detail || {};
     console.log('[bill] ' + d.name, d.payload);
+    if (d.name) eventosVistos.push(d.name);
     if (d.name === 'fingerprintSuccess' && d.payload) {
       fingerprintDeviceId = d.payload.deviceId || null;
     }
     if (d.name === 'fingerprintError') {
-      showError('Bill.com rejected this page origin (fingerprintError). ' +
-        'Ask BILL to allow http://localhost:3000.');
+      // BILL no autorizo el origen de esta pagina. El widget no va a pintar,
+      // asi que se avisa en pantalla completa y no en el paso 1, que para
+      // entonces puede estar ya oculto.
+      fingerprintFallo = true;
+      console.error('[bill] fingerprintError: origen no autorizado', d.payload);
     }
   });
 
@@ -304,6 +394,7 @@
 
     const payload = event.payload || {};
     console.log('[bill] evento ' + event.name, payload);
+    eventosVistos.push(event.name);
 
     // El widget no va a dibujar nada: sin este aviso quedaria la pantalla vacia.
     if (event.name === 'mfaReady' && payload.required === false) {
@@ -331,10 +422,11 @@
         mostrarFinal('Your device is MFA-trusted',
           'The device and rememberMeId were sent to Zapier. You can close this page.');
       } else {
-        mostrarFinal('Trusted, but not delivered',
-          'Bill.com trusted this device, but it was not sent to Zapier: ' +
-          (data.error ? data.error + ' ' + (data.detalle || '')
-                      : JSON.stringify(data.zapier || data)));
+        mostrarFallo('Trusted, but not delivered',
+          'Bill.com trusted this device, but it was not sent to Zapier. ' +
+          'Please contact TAP support.',
+          data.error ? data.error + ' ' + (data.detalle || '')
+                     : JSON.stringify(data.zapier || data));
       }
     }
   }
