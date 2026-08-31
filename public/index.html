@@ -259,8 +259,14 @@
 
   // 1. sessionId (POST /v3/login del lado servidor, con las credenciales del perfil).
   //    Las credenciales nunca llegan aqui: el browser solo recibe el sessionId.
-  async function getSessionId() {
-    if (session) return session.sessionId;
+  //
+  //    OJO: cada login manda un SMS al telefono del usuario BILL y gasta un
+  //    intento. Por eso `session` solo se reemplaza cuando la sesion nueva ya
+  //    existe (nunca se deja en null a medias) y los reintentos estan topados.
+  const MAX_RELOGIN = 1;
+  let reloginsHechos = 0;
+
+  async function renovarSesion() {
     const login = await api('/api/login', {});
     if (login.status === 423) {
       const err = new Error('locked');
@@ -272,12 +278,34 @@
     return session.sessionId;
   }
 
+  async function getSessionId() {
+    if (session) return session.sessionId;
+    return renovarSesion();
+  }
+
   // 2. Config del bootloader: getSessionId es lo que BILL invoca para autenticar.
   const billBootConfig = {
     key: config.devKey,
     getSessionId: () => getSessionId(),
-    getUserContext: () => ({ userId: session.userId, orgId: session.orgId }),
-    onAuthFailed: async () => { session = null; return getSessionId(); },
+    // Nunca puede lanzar: si lanza, el widget corta con get-user-context-failed
+    // y se queda en bucle sin pintar nada.
+    getUserContext: () => (session
+      ? { userId: session.userId, orgId: session.orgId }
+      : { userId: null, orgId: null }),
+    onAuthFailed: async () => {
+      if (reloginsHechos >= MAX_RELOGIN) {
+        // Reintentar en bucle mandaria un SMS por vuelta y agotaria los intentos.
+        console.error('[bill] onAuthFailed repetido: se corta para no gastar intentos');
+        mostrarFallo('Bill.com rejected the session',
+          'Bill.com did not accept the session for this environment. ' +
+          'Please contact TAP support.',
+          detalleDiagnostico());
+        throw new Error('auth failed twice');
+      }
+      reloginsHechos += 1;
+      console.warn('[bill] onAuthFailed: renovando sessionId (' + reloginsHechos + ')');
+      return renovarSesion();
+    },
     onEvent: (event) => onWidgetEvent(event),
   };
 
@@ -305,14 +333,18 @@
       if (pintado) {
         mostrarWidget();
       } else {
-        mostrarFallo(
-          'Bill.com could not load',
-          fingerprintFallo
-            ? 'Bill.com did not authorize this page, so the verification widget ' +
-              'could not start. Please contact TAP support.'
-            : 'The verification widget did not load. Please reload the page, ' +
-              'and contact TAP support if it keeps happening.',
-          detalleDiagnostico());
+        let motivo;
+        if (fingerprintFallo) {
+          motivo = 'Bill.com did not authorize this page, so the verification ' +
+            'widget could not start. Please contact TAP support.';
+        } else if (desajusteEntorno()) {
+          motivo = 'This app is running against Bill.com production, but the ' +
+            'production widget URL is not configured. Please contact TAP support.';
+        } else {
+          motivo = 'The verification widget did not load. Please reload the page, ' +
+            'and contact TAP support if it keeps happening.';
+        }
+        mostrarFallo('Bill.com could not load', motivo, detalleDiagnostico());
       }
     } catch (err) {
       if (err && err.locked) return mostrarBloqueo();
@@ -338,13 +370,23 @@
     });
   }
 
+  // El widget de stage no puede validar un sessionId de produccion: es la
+  // causa mas probable de que el Element no arranque en un deploy real.
+  function desajusteEntorno() {
+    return config.env === 'production' &&
+      String(config.bootloaderUrl || '').includes('.stage.');
+  }
+
   // Pistas para soporte, sin exponer nada sensible.
   function detalleDiagnostico() {
-    return [
+    const partes = [
       'origin ' + location.origin,
       'env ' + config.env,
+      'bootloader ' + (desajusteEntorno() ? 'STAGE (mismatch)' : 'ok'),
       'events ' + (eventosVistos.join(',') || 'none'),
-    ].join(' · ');
+    ];
+    if (ultimoErrorWidget) partes.push('last ' + ultimoErrorWidget);
+    return partes.join(' · ');
   }
 
   // Si el servidor ya esta bloqueado, no se muestra ni el boton.
@@ -367,6 +409,8 @@
   // el rememberMeId no sirve para abrir una sesion trusted.
   let fingerprintDeviceId = null;
   let fingerprintFallo = false;
+  let erroresWidget = 0;
+  let ultimoErrorWidget = null;
   const eventosVistos = [];
 
   window.addEventListener('bill-bootloader', (e) => {
@@ -382,6 +426,19 @@
       // entonces puede estar ya oculto.
       fingerprintFallo = true;
       console.error('[bill] fingerprintError: origen no autorizado', d.payload);
+    }
+    // El widget emite `error` en bucle cuando no puede arrancar. Sin esto la
+    // pagina se queda en blanco mientras la consola se llena de errores.
+    if (d.name === 'error') {
+      erroresWidget += 1;
+      const p = d.payload || {};
+      ultimoErrorWidget = p.error || p.msg || 'unknown';
+      if (erroresWidget >= 3 && !resuelto) {
+        mostrarFallo('Bill.com could not start',
+          'The verification widget reported an error and could not start. ' +
+          'Please contact TAP support.',
+          ultimoErrorWidget + ' · ' + detalleDiagnostico());
+      }
     }
   });
 
