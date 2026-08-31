@@ -64,6 +64,13 @@ const PORT = Number(process.env.PORT || 3000);
 // Un store por perfil: el rememberMeId de sandbox no sirve en produccion.
 const STORE_FILE = path.join(__dirname, '.remember-me.' + PROFILE + '.json');
 
+// Bloqueo de seguridad. Cada POST /api/login manda un codigo nuevo al telefono
+// del usuario BILL: MAX_ATTEMPTS limita cuantos se pueden pedir sin acertar.
+// El contador vive en disco y NO en el browser, para que no se pueda burlar
+// borrando localStorage ni abriendo una ventana de incognito.
+const MAX_ATTEMPTS = Number(process.env.MAX_MFA_ATTEMPTS || 4);
+const ATTEMPTS_FILE = path.join(__dirname, '.attempts.' + PROFILE + '.json');
+
 // Sesion viva en memoria (nunca se persiste el sessionId a disco).
 const state = {
   sessionId: null,
@@ -121,7 +128,10 @@ function billSessionInfo(sessionId) {
 // ---------------------------------------------------------------------------
 
 const routes = {
+  // Nota de seguridad: aqui NO viaja ni BILL_USERNAME ni BILL_PASSWORD.
+  // El devKey si, porque el bootloader del widget lo exige en el browser.
   'GET /api/config': async function () {
+    const attempts = readAttempts();
     return {
       status: 200,
       body: {
@@ -131,12 +141,29 @@ const routes = {
         devKey: DEV_KEY,
         zapierConfigured: Boolean(ZAPIER_WEBHOOK_URL),
         credentialsConfigured: Boolean(DEV_KEY && USERNAME && PASSWORD && ORG_ID),
+        locked: attempts.failed >= MAX_ATTEMPTS,
+        maxAttempts: MAX_ATTEMPTS,
+        attemptsLeft: Math.max(0, MAX_ATTEMPTS - attempts.failed),
       },
     };
   },
 
   // 1. Genera el sessionId que consume getSessionId() del bootloader.
   'POST /api/login': async function () {
+    // Cada login manda un codigo nuevo al telefono: se cuenta antes de nada.
+    if (isLocked()) {
+      const a = readAttempts();
+      log('  BLOQUEADO: ya se agotaron los ' + MAX_ATTEMPTS + ' intentos.');
+      return {
+        status: 423,
+        body: {
+          error: 'locked',
+          maxAttempts: MAX_ATTEMPTS,
+          lockedAt: a.lockedAt,
+        },
+      };
+    }
+
     const missing = ['BILL_DEV_KEY', 'BILL_USERNAME', 'BILL_PASSWORD', 'BILL_ORG_ID']
       .filter(function (k) { return !process.env[k]; });
     if (missing.length) {
@@ -145,13 +172,20 @@ const routes = {
 
     const login = await billLogin();
     if (!login.ok) {
-      return { status: login.status, body: { error: 'Fallo POST /v3/login', detail: login.data } };
+      // La respuesta cruda de BILL se queda en el log del servidor: al browser
+      // solo le llega un mensaje generico.
+      log('  /v3/login FALLO ' + login.status + ': ' + JSON.stringify(login.data));
+      return { status: login.status, body: { error: 'Bill.com rejected the login. Check the server logs.' } };
     }
 
     state.sessionId = login.data.sessionId;
     state.userId = login.data.userId;
     state.orgId = login.data.organizationId;
     state.trusted = Boolean(login.data.trusted);
+
+    // El login salio bien: a partir de aqui BILL manda el codigo. Este intento
+    // se descuenta y solo se perdona si el MFA termina en exito.
+    const attempts = countAttempt();
 
     const info = await billSessionInfo(state.sessionId);
 
@@ -164,6 +198,8 @@ const routes = {
         trusted: state.trusted,
         mfaStatus: info.data && info.data.mfaStatus,
         mfaBypass: info.data && info.data.mfaBypass,
+        attemptsLeft: Math.max(0, MAX_ATTEMPTS - attempts.failed),
+        maxAttempts: MAX_ATTEMPTS,
       },
     };
   },
@@ -204,6 +240,9 @@ const routes = {
       environment: ENV,
       capturedAt: new Date().toISOString(),
     }));
+
+    // El MFA se completo: se perdonan los intentos gastados.
+    resetAttempts();
 
     let zapier = { sent: false, reason: 'ZAPIER_WEBHOOK_URL no configurado' };
     if (ZAPIER_WEBHOOK_URL) {
@@ -310,6 +349,47 @@ function readJsonBody(req) {
 
 function writeStore(record) {
   fs.writeFileSync(STORE_FILE, JSON.stringify(record, null, 2), 'utf8');
+}
+
+// --- Contador de intentos ---------------------------------------------------
+
+function readAttempts() {
+  try {
+    const data = JSON.parse(fs.readFileSync(ATTEMPTS_FILE, 'utf8'));
+    return { failed: Number(data.failed) || 0, lockedAt: data.lockedAt || null };
+  } catch (err) {
+    return { failed: 0, lockedAt: null };
+  }
+}
+
+function writeAttempts(data) {
+  fs.writeFileSync(ATTEMPTS_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function isLocked() {
+  return readAttempts().failed >= MAX_ATTEMPTS;
+}
+
+/** Un intento mas. Devuelve el estado ya actualizado. */
+function countAttempt() {
+  const prev = readAttempts();
+  const next = {
+    failed: prev.failed + 1,
+    lockedAt: prev.lockedAt,
+  };
+  if (next.failed >= MAX_ATTEMPTS && !next.lockedAt) {
+    next.lockedAt = new Date().toISOString();
+  }
+  writeAttempts(next);
+  log('  intento ' + next.failed + '/' + MAX_ATTEMPTS +
+    (next.failed >= MAX_ATTEMPTS ? ' - BLOQUEADO' : ''));
+  return next;
+}
+
+/** Exito: se borra el contador y la app vuelve a estar disponible. */
+function resetAttempts() {
+  try { fs.unlinkSync(ATTEMPTS_FILE); } catch (err) { /* no existia */ }
+  log('  contador de intentos reiniciado');
 }
 
 function loadDotEnv(file) {

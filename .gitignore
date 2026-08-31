@@ -3,4 +3,5 @@
 .env.live
 .remember-me.json
 .remember-me.*.json
+.attempts.*.json
 node_modules/

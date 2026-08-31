@@ -67,6 +67,9 @@
     }
     #error:empty { display: none; }
 
+    #attempts { margin: 8px 0 0; font-size: 13px; color: #b06000; }
+    #attempts:empty { display: none; }
+
     /* El widget de BILL trae su propia caja; solo le damos el ancho. */
     #your-div { width: 100%; max-width: 480px; }
 
@@ -78,15 +81,17 @@
       font-size: 14px;
     }
 
-    #done { max-width: 420px; }
-    #done h2 { font-size: 19px; font-weight: 600; margin: 0 0 8px; }
-    #done p { margin: 0; color: #5f6368; }
-    .check {
+    #done, #locked { max-width: 420px; }
+    #done h2, #locked h2 { font-size: 19px; font-weight: 600; margin: 0 0 8px; }
+    #done p, #locked p { margin: 0; color: #5f6368; }
+    .check, .cross {
       width: 40px; height: 40px; margin: 0 auto 16px;
-      border-radius: 50%; background: #e6f4ea; color: #137333;
+      border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
       font-size: 21px; font-weight: 700;
     }
+    .check { background: #e6f4ea; color: #137333; }
+    .cross { background: #fce8e6; color: #c5221f; font-size: 26px; }
 
     /* Transicion suave al cambiar de paso, en vez de un corte seco. */
     .fade-out { opacity: 0; transition: opacity .18s ease; }
@@ -111,6 +116,7 @@
   <!-- Critico: si no se marca la casilla, BILL no emite rememberMeId
        y no hay nada que mandarle a Zapier. -->
   <p id="hint">Please, check “Remember this device” before you get into the code.</p>
+  <p id="attempts"></p>
   <p id="error" role="alert"></p>
 </section>
 
@@ -122,6 +128,16 @@
   <div class="check" aria-hidden="true">&check;</div>
   <h2 id="done-title"></h2>
   <p id="done-text"></p>
+</section>
+
+<!-- Bloqueo por seguridad: se agotaron los intentos. -->
+<section id="locked" hidden>
+  <div class="cross" aria-hidden="true">&times;</div>
+  <h2>Locked for security</h2>
+  <p>
+    The verification code failed too many times, so this app was locked
+    to protect the Bill.com account. Please contact TAP support.
+  </p>
 </section>
 
 <script type="module">
@@ -169,6 +185,15 @@
     mostrar($('done'));
   }
 
+  // Bloqueo por seguridad: no queda nada que se pueda pulsar.
+  function mostrarBloqueo() {
+    if (!$('intro').hidden) ocultar($('intro'));
+    $('your-div').hidden = true;
+    $('done').hidden = true;
+    mostrar($('locked'));
+    if (bootloader) { try { bootloader.destroy('element1'); } catch (err) {} }
+  }
+
   // ---------------------------------------------------------------------
   // Flujo
   // ---------------------------------------------------------------------
@@ -192,9 +217,15 @@
   const CLAVES_BILL = ['_rememberMeIdBill', '_deviceIdBill'];
 
   // 1. sessionId (POST /v3/login del lado servidor, con las credenciales del perfil).
+  //    Las credenciales nunca llegan aqui: el browser solo recibe el sessionId.
   async function getSessionId() {
     if (session) return session.sessionId;
     const login = await api('/api/login', {});
+    if (login.status === 423) {
+      const err = new Error('locked');
+      err.locked = true;
+      throw err;
+    }
     if (!login.ok) throw new Error(login.data.error || 'POST /v3/login failed');
     session = login.data;
     return session.sessionId;
@@ -227,9 +258,18 @@
       // Recien ahora, con el widget ya pintado, se va el paso 1.
       mostrarWidget();
     } catch (err) {
+      if (err && err.locked) return mostrarBloqueo();
       showError(String(err && err.message ? err.message : err));
     }
   };
+
+  // Si el servidor ya esta bloqueado, no se muestra ni el boton.
+  if (config.locked) {
+    mostrarBloqueo();
+  } else if (config.attemptsLeft < config.maxAttempts) {
+    $('attempts').textContent =
+      config.attemptsLeft + ' of ' + config.maxAttempts + ' attempts remaining.';
+  }
 
   // El bootloader emite los eventos del widget como CustomEvent.
   window.addEventListener('bill-bootloader:element1', (e) => {
