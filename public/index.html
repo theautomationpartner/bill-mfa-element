@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Get MFA Trusted to Bill.com</title>
+  <link rel="dns-prefetch preconnect" href="https://widgets.stage.bdccdn.net/" crossorigin />
+  <link rel="preload" as="script" href="https://widgets.stage.bdccdn.net/bootloader/index.js" />
+  <style>
+    /* Solo lo necesario: el titulo, el boton y el spinner que vive dentro. */
+
+    /* Una sola pantalla centrada en los dos ejes. dvh para que en movil
+       cuente la barra del navegador y no quede el contenido corrido. */
+    body {
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: #202124;
+      box-sizing: border-box;
+      min-height: 100dvh;
+      margin: 0;
+      padding: 32px 20px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+    }
+
+    h1 { font-size: 22px; font-weight: 600; margin: 0 0 24px; }
+
+    #btn-start {
+      /* min-width fijo: al pasar a "Loading…" el boton no cambia de tamano. */
+      min-width: 170px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      background: #1a73e8;
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      padding: 11px 22px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color .15s ease;
+    }
+    #btn-start:hover:not(:disabled) { background: #1765cc; }
+    #btn-start:focus-visible { outline: 2px solid #1a73e8; outline-offset: 3px; }
+
+    /* Estado de carga: gris, sin puntero de "clickeable", spinner visible. */
+    #btn-start[aria-busy="true"] { background: #9aa0a6; cursor: progress; }
+
+    .spinner {
+      width: 15px; height: 15px; flex: none;
+      border: 2px solid rgba(255, 255, 255, .45);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    #btn-start:not([aria-busy="true"]) .spinner { display: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #error {
+      max-width: 420px;
+      margin: 18px 0 0;
+      color: #c5221f;
+    }
+    #error:empty { display: none; }
+
+    /* El widget de BILL trae su propia caja; solo le damos el ancho. */
+    #your-div { width: 100%; max-width: 480px; }
+
+    /* Aviso bajo el boton: se lee antes de arrancar, que es cuando sirve. */
+    #hint {
+      max-width: 340px;
+      margin: 16px auto 0;
+      color: #5f6368;
+      font-size: 14px;
+    }
+
+    #done { max-width: 420px; }
+    #done h2 { font-size: 19px; font-weight: 600; margin: 0 0 8px; }
+    #done p { margin: 0; color: #5f6368; }
+    .check {
+      width: 40px; height: 40px; margin: 0 auto 16px;
+      border-radius: 50%; background: #e6f4ea; color: #137333;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 21px; font-weight: 700;
+    }
+
+    /* Transicion suave al cambiar de paso, en vez de un corte seco. */
+    .fade-out { opacity: 0; transition: opacity .18s ease; }
+    .fade-in { animation: fade-in .22s ease both; }
+    @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .spinner { animation-duration: 1.6s; }
+      .fade-in, .fade-out { animation: none; transition: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Paso 1: titulo + boton. Desaparece cuando el widget esta listo. -->
+<section id="intro">
+  <h1>Get MFA Trusted to Bill.com</h1>
+  <button id="btn-start" type="button">
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="btn-label">Get Started</span>
+  </button>
+  <!-- Critico: si no se marca la casilla, BILL no emite rememberMeId
+       y no hay nada que mandarle a Zapier. -->
+  <p id="hint">Please, check “Remember this device” before you get into the code.</p>
+  <p id="error" role="alert"></p>
+</section>
+
+<!-- Paso 2: aqui adentro renderiza BILL. -->
+<div id="your-div"></div>
+
+<!-- Paso 3: confirmacion. -->
+<section id="done" hidden>
+  <div class="check" aria-hidden="true">&check;</div>
+  <h2 id="done-title"></h2>
+  <p id="done-text"></p>
+</section>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+
+  // ---------------------------------------------------------------------
+  // Pasos de la UI. En pantalla hay siempre uno solo, centrado.
+  // ---------------------------------------------------------------------
+
+  // El spinner vive DENTRO del boton: mismo boton, gris y con "Loading…".
+  function setLoading(on) {
+    const btn = $('btn-start');
+    btn.disabled = on;
+    btn.setAttribute('aria-busy', String(on));
+    $('btn-label').textContent = on ? 'Loading…' : 'Get Started';
+  }
+
+  function showError(message) {
+    $('error').textContent = message;
+    setLoading(false);
+  }
+
+  function ocultar(el) {
+    el.classList.add('fade-out');
+    setTimeout(() => { el.hidden = true; el.classList.remove('fade-out'); }, 180);
+  }
+
+  function mostrar(el) {
+    el.hidden = false;
+    el.classList.add('fade-in');
+  }
+
+  // Titulo y boton se van; queda el widget solo, centrado.
+  function mostrarWidget() {
+    // El aviso vive dentro de #intro, asi que se va con el.
+    ocultar($('intro'));
+    $('your-div').classList.add('fade-in');
+  }
+
+  function mostrarFinal(titulo, texto) {
+    if (!$('intro').hidden) ocultar($('intro'));
+    $('your-div').hidden = true;
+    $('done-title').textContent = titulo;
+    $('done-text').textContent = texto;
+    mostrar($('done'));
+  }
+
+  // ---------------------------------------------------------------------
+  // Flujo
+  // ---------------------------------------------------------------------
+
+  async function api(pathname, body) {
+    const res = await fetch(pathname, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { ok: res.ok, status: res.status, data: await res.json().catch(() => ({})) };
+  }
+
+  const config = (await api('/api/config')).data;
+  let session = null;
+  let bootloader = null;
+
+  // El widget guarda aqui la confianza del navegador. Si estas claves existen,
+  // hace el step-up solo y NO dibuja nada. Las limpiamos para que el desafio
+  // se muestre siempre y emita un rememberMeId nuevo.
+  const CLAVES_BILL = ['_rememberMeIdBill', '_deviceIdBill'];
+
+  // 1. sessionId (POST /v3/login del lado servidor, con las credenciales del perfil).
+  async function getSessionId() {
+    if (session) return session.sessionId;
+    const login = await api('/api/login', {});
+    if (!login.ok) throw new Error(login.data.error || 'POST /v3/login failed');
+    session = login.data;
+    return session.sessionId;
+  }
+
+  // 2. Config del bootloader: getSessionId es lo que BILL invoca para autenticar.
+  const billBootConfig = {
+    key: config.devKey,
+    getSessionId: () => getSessionId(),
+    getUserContext: () => ({ userId: session.userId, orgId: session.orgId }),
+    onAuthFailed: async () => { session = null; return getSessionId(); },
+    onEvent: (event) => onWidgetEvent(event),
+  };
+
+  $('btn-start').onclick = async () => {
+    $('error').textContent = '';
+    setLoading(true);
+    try {
+      await getSessionId();
+
+      for (const k of CLAVES_BILL) localStorage.removeItem(k);
+
+      const mod = await import(config.bootloaderUrl);
+      bootloader = mod.init(billBootConfig);
+      if (!bootloader) throw new Error('bootloader init() returned null');
+
+      bootloader.register({ id: 'element1', name: 'mfa', outputs: { onEvent: onWidgetEvent } });
+      await bootloader.render('element1', '#your-div');
+
+      // Recien ahora, con el widget ya pintado, se va el paso 1.
+      mostrarWidget();
+    } catch (err) {
+      showError(String(err && err.message ? err.message : err));
+    }
+  };
+
+  // El bootloader emite los eventos del widget como CustomEvent.
+  window.addEventListener('bill-bootloader:element1', (e) => {
+    const d = e.detail || {};
+    onWidgetEvent(d.payload && d.payload.name ? d.payload : d);
+  });
+  window.addEventListener('element1', (e) => onWidgetEvent(e.detail));
+
+  // El deviceId lo emite el fingerprinting del bootloader, antes del MFA.
+  // Lo guardamos como respaldo por si mfaSuccess llega sin el: sin deviceId
+  // el rememberMeId no sirve para abrir una sesion trusted.
+  let fingerprintDeviceId = null;
+  window.addEventListener('bill-bootloader', (e) => {
+    const d = e.detail || {};
+    console.log('[bill] ' + d.name, d.payload);
+    if (d.name === 'fingerprintSuccess' && d.payload) {
+      fingerprintDeviceId = d.payload.deviceId || null;
+    }
+    if (d.name === 'fingerprintError') {
+      showError('Bill.com rejected this page origin (fingerprintError). ' +
+        'Ask BILL to allow http://localhost:3000.');
+    }
+  });
+
+  const seen = new Set();
+
+  async function onWidgetEvent(event) {
+    if (!event || !event.name) return;
+    const key = event.name + '|' + JSON.stringify(event.payload || {});
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    const payload = event.payload || {};
+    console.log('[bill] evento ' + event.name, payload);
+
+    // El widget no va a dibujar nada: sin este aviso quedaria la pantalla vacia.
+    if (event.name === 'mfaReady' && payload.required === false) {
+      mostrarFinal('Already MFA-trusted',
+        'This session is already trusted, so there is no code to verify.');
+    }
+
+    // 3. MFA resuelto: mandamos device + rememberMeId al webhook de Zapier.
+    if (event.name === 'mfaSuccess') {
+      if (!payload.rememberMeId) {
+        mostrarFinal('Almost there', 'The verification succeeded.');
+        return;
+      }
+      // Si el evento no trajo deviceId, usamos el del fingerprinting.
+      const envio = Object.assign({}, payload);
+      if (!envio.deviceId && fingerprintDeviceId) {
+        envio.deviceId = fingerprintDeviceId;
+        console.log('[bill] deviceId tomado del fingerprint:', fingerprintDeviceId);
+      }
+
+      const { ok, data } = await api('/api/remember-me', envio);
+      console.log('[bill] /api/remember-me ->', ok, data);
+      const sent = ok && data.zapier && data.zapier.sent;
+      if (sent) {
+        mostrarFinal('Your device is MFA-trusted',
+          'The device and rememberMeId were sent to Zapier. You can close this page.');
+      } else {
+        mostrarFinal('Trusted, but not delivered',
+          'Bill.com trusted this device, but it was not sent to Zapier: ' +
+          (data.error ? data.error + ' ' + (data.detalle || '')
+                      : JSON.stringify(data.zapier || data)));
+      }
+    }
+  }
+
+  window.addEventListener('beforeunload', () => {
+    if (bootloader) { try { bootloader.destroy('element1'); } catch (err) {} }
+  });
+</script>
+</body>
+</html>

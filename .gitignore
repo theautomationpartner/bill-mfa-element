@@ -1,0 +1,6 @@
+.env
+.env.sandbox
+.env.live
+.remember-me.json
+.remember-me.*.json
+node_modules/

@@ -1,0 +1,324 @@
+/**
+ * Mini servidor local para probar el BILL MFA Element.
+ *
+ * Sin dependencias: requiere Node 18+ (usa fetch nativo).
+ *
+ * Responsabilidades:
+ *  1. Guardar las credenciales BILL del lado servidor (nunca en el browser).
+ *  2. Generar el sessionId con POST /v3/login y entregarlo al bootloader
+ *     (es lo que consume getSessionId() del widget).
+ *  3. Recibir el payload del evento `mfaSuccess` y reenviar device +
+ *     rememberMeId al Catch Webhook de Zapier.
+ */
+
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+
+// ---------------------------------------------------------------------------
+// Configuracion
+// ---------------------------------------------------------------------------
+
+// Perfil de credenciales: .env.sandbox (por defecto) o .env.live.
+//   node server.js            -> sandbox
+//   node server.js live       -> produccion
+//   BILL_PROFILE=live node server.js
+const PROFILE = (process.env.BILL_PROFILE || process.argv[2] || 'sandbox').toLowerCase();
+
+if (PROFILE !== 'sandbox' && PROFILE !== 'live') {
+  console.error('Perfil desconocido: "' + PROFILE + '". Usa "sandbox" o "live".');
+  process.exit(1);
+}
+
+// En local las credenciales salen de .env.<perfil>. En un servidor desplegado
+// ese archivo no existe y llegan como variables de entorno reales: por eso el
+// archivo es opcional, y loadDotEnv nunca pisa lo que ya venga del entorno.
+const ENV_FILE = path.join(__dirname, '.env.' + PROFILE);
+const ENV_FILE_FOUND = fs.existsSync(ENV_FILE);
+if (ENV_FILE_FOUND) loadDotEnv(ENV_FILE);
+
+const ENV = (process.env.BILL_ENV || (PROFILE === 'live' ? 'production' : 'sandbox')).toLowerCase();
+
+const GATEWAYS = {
+  sandbox: 'https://gateway.stage.bill.com/connect',
+  production: 'https://gateway.prod.bill.com/connect',
+};
+
+// Nota: BILL solo publica el bootloader de stage en su documentacion.
+// El de produccion se confirma con tu account manager de BILL.
+const BOOTLOADERS = {
+  sandbox: 'https://widgets.stage.bdccdn.net/bootloader/index.js',
+  production: 'https://widgets.stage.bdccdn.net/bootloader/index.js',
+};
+
+const GATEWAY = process.env.BILL_GATEWAY_URL || GATEWAYS[ENV] || GATEWAYS.sandbox;
+const BOOTLOADER_URL = process.env.BILL_BOOTLOADER_URL || BOOTLOADERS[ENV] || BOOTLOADERS.sandbox;
+
+const DEV_KEY = process.env.BILL_DEV_KEY || '';
+const USERNAME = process.env.BILL_USERNAME || '';
+const PASSWORD = process.env.BILL_PASSWORD || '';
+const ORG_ID = process.env.BILL_ORG_ID || '';
+const ZAPIER_WEBHOOK_URL = process.env.ZAPIER_WEBHOOK_URL || '';
+const PORT = Number(process.env.PORT || 3000);
+
+// Un store por perfil: el rememberMeId de sandbox no sirve en produccion.
+const STORE_FILE = path.join(__dirname, '.remember-me.' + PROFILE + '.json');
+
+// Sesion viva en memoria (nunca se persiste el sessionId a disco).
+const state = {
+  sessionId: null,
+  userId: null,
+  orgId: null,
+  trusted: false,
+};
+
+// ---------------------------------------------------------------------------
+// Cliente BILL v3
+// ---------------------------------------------------------------------------
+
+async function billFetch(pathname, options) {
+  const opts = options || {};
+  const headers = { devKey: DEV_KEY };
+  if (opts.sessionId) headers.sessionId = opts.sessionId;
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+
+  const res = await fetch(GATEWAY + pathname, {
+    method: opts.method || 'GET',
+    headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+  });
+
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (err) {
+    data = { raw: text };
+  }
+  return { ok: res.ok, status: res.status, data };
+}
+
+/** POST /v3/login: las credenciales que producen el sessionId del widget. */
+function billLogin() {
+  return billFetch('/v3/login', {
+    method: 'POST',
+    body: {
+      devKey: DEV_KEY,
+      username: USERNAME,
+      password: PASSWORD,
+      organizationId: ORG_ID,
+    },
+  });
+}
+
+/** GET /v3/login/session -> { organizationId, userId, mfaStatus, mfaBypass } */
+function billSessionInfo(sessionId) {
+  return billFetch('/v3/login/session', { sessionId });
+}
+
+// ---------------------------------------------------------------------------
+// Handlers de la API local
+// ---------------------------------------------------------------------------
+
+const routes = {
+  'GET /api/config': async function () {
+    return {
+      status: 200,
+      body: {
+        env: ENV,
+        gateway: GATEWAY,
+        bootloaderUrl: BOOTLOADER_URL,
+        devKey: DEV_KEY,
+        zapierConfigured: Boolean(ZAPIER_WEBHOOK_URL),
+        credentialsConfigured: Boolean(DEV_KEY && USERNAME && PASSWORD && ORG_ID),
+      },
+    };
+  },
+
+  // 1. Genera el sessionId que consume getSessionId() del bootloader.
+  'POST /api/login': async function () {
+    const missing = ['BILL_DEV_KEY', 'BILL_USERNAME', 'BILL_PASSWORD', 'BILL_ORG_ID']
+      .filter(function (k) { return !process.env[k]; });
+    if (missing.length) {
+      return { status: 400, body: { error: (ENV_FILE_FOUND ? 'Faltan variables en .env.' + PROFILE + ': ' : 'Faltan variables de entorno: ') + missing.join(', ') } };
+    }
+
+    const login = await billLogin();
+    if (!login.ok) {
+      return { status: login.status, body: { error: 'Fallo POST /v3/login', detail: login.data } };
+    }
+
+    state.sessionId = login.data.sessionId;
+    state.userId = login.data.userId;
+    state.orgId = login.data.organizationId;
+    state.trusted = Boolean(login.data.trusted);
+
+    const info = await billSessionInfo(state.sessionId);
+
+    return {
+      status: 200,
+      body: {
+        sessionId: state.sessionId, // el widget lo necesita en el browser
+        userId: state.userId,
+        orgId: state.orgId,
+        trusted: state.trusted,
+        mfaStatus: info.data && info.data.mfaStatus,
+        mfaBypass: info.data && info.data.mfaBypass,
+      },
+    };
+  },
+
+  // 2. Recibe el payload de mfaSuccess y manda device + rememberMeId a Zapier.
+  'POST /api/remember-me': async function (req) {
+    const payload = req.body || {};
+    log('mfaSuccess recibido. Campos: ' + JSON.stringify(Object.keys(payload)));
+
+    if (!payload.rememberMeId) {
+      log('  RECHAZADO: falta rememberMeId.');
+      return { status: 400, body: { error: 'Falta rememberMeId en el payload de mfaSuccess.' } };
+    }
+    if (!payload.deviceId) {
+      log('  RECHAZADO: falta deviceId.');
+      return {
+        status: 400,
+        body: {
+          error: 'mfaSuccess llego sin deviceId.',
+          // VERIFICADO: `device` en POST /v3/login debe ser el `deviceId` que emite
+          // el widget, NO un nickname libre. La doc de BILL dice "nickname for your
+          // mobile device" y es enganosa: con un nickname arbitrario el login
+          // responde trusted:false / mfaStatus:CHALLENGE.
+          detalle: 'Sin deviceId, POST /v3/login NO produce una sesion trusted. Repite el MFA marcando "Remember this device".',
+        },
+      };
+    }
+
+    // Exactamente lo que el Zap necesita para el relogin MFA-trusted.
+    const record = {
+      device: payload.deviceId,
+      rememberMeId: payload.rememberMeId,
+    };
+
+    writeStore(Object.assign({}, record, {
+      userId: state.userId,
+      organizationId: state.orgId,
+      environment: ENV,
+      capturedAt: new Date().toISOString(),
+    }));
+
+    let zapier = { sent: false, reason: 'ZAPIER_WEBHOOK_URL no configurado' };
+    if (ZAPIER_WEBHOOK_URL) {
+      log('  POST -> ' + ZAPIER_WEBHOOK_URL);
+      log('  body  -> ' + JSON.stringify(record));
+      try {
+        const res = await fetch(ZAPIER_WEBHOOK_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(record),
+        });
+        zapier = { sent: res.ok, status: res.status, response: await res.text() };
+        log('  Zapier respondio ' + res.status + ': ' + zapier.response);
+      } catch (err) {
+        zapier = { sent: false, error: String(err) };
+        log('  Zapier FALLO: ' + String(err));
+      }
+    }
+
+    return { status: 200, body: { saved: record, zapier: zapier } };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Servidor HTTP
+// ---------------------------------------------------------------------------
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+};
+
+const server = http.createServer(async function (req, res) {
+  const url = new URL(req.url, 'http://localhost:' + PORT);
+  const key = req.method + ' ' + url.pathname;
+
+  if (routes[key]) {
+    try {
+      log(key);
+      req.body = await readJsonBody(req);
+      const out = await routes[key](req);
+      log('  -> ' + out.status);
+      return send(res, out.status, out.body);
+    } catch (err) {
+      return send(res, 500, { error: String(err && err.stack ? err.stack : err) });
+    }
+  }
+
+  // Estaticos
+  const publicDir = path.join(__dirname, 'public');
+  const file = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\/+/, '');
+  const full = path.join(publicDir, file);
+  if (full.indexOf(publicDir) !== 0 || !fs.existsSync(full)) {
+    return send(res, 404, { error: 'Not found' });
+  }
+  res.writeHead(200, { 'Content-Type': MIME[path.extname(full)] || 'application/octet-stream' });
+  fs.createReadStream(full).pipe(res);
+});
+
+server.listen(PORT, function () {
+  console.log('');
+  console.log('  BILL MFA Element - app de prueba local');
+  console.log('  ---------------------------------------');
+  console.log('  URL          http://localhost:' + PORT);
+  console.log('  Perfil       ' + PROFILE +
+    (ENV_FILE_FOUND ? '  (.env.' + PROFILE + ')' : '  (variables de entorno)'));
+  console.log('  Entorno      ' + ENV);
+  console.log('  Gateway      ' + GATEWAY);
+  console.log('  Bootloader   ' + BOOTLOADER_URL);
+  console.log('  Zapier       ' + (ZAPIER_WEBHOOK_URL || '(no configurado)'));
+  console.log('  Credenciales ' + (DEV_KEY && USERNAME && PASSWORD && ORG_ID ? 'OK' : 'FALTAN - revisa ' + (ENV_FILE_FOUND ? '.env.' + PROFILE : 'las variables de entorno')));
+  console.log('');
+});
+
+// ---------------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------------
+
+function log(msg) {
+  console.log(new Date().toISOString().slice(11, 19) + '  ' + msg);
+}
+
+function send(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(body, null, 2));
+}
+
+function readJsonBody(req) {
+  if (req.method === 'GET' || req.method === 'HEAD') return Promise.resolve(null);
+  return new Promise(function (resolve, reject) {
+    let raw = '';
+    req.on('data', function (c) {
+      raw += c;
+      if (raw.length > 1e6) reject(new Error('Body demasiado grande'));
+    });
+    req.on('end', function () {
+      if (!raw) return resolve(null);
+      try { resolve(JSON.parse(raw)); } catch (err) { resolve({ raw: raw }); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function writeStore(record) {
+  fs.writeFileSync(STORE_FILE, JSON.stringify(record, null, 2), 'utf8');
+}
+
+function loadDotEnv(file) {
+  if (!fs.existsSync(file)) return;
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (!m || line.trim().indexOf('#') === 0) continue;
+    const value = m[2].replace(/^["']|["']$/g, '');
+    if (process.env[m[1]] === undefined) process.env[m[1]] = value;
+  }
+}

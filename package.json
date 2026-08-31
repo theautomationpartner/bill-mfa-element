@@ -1,0 +1,16 @@
+{
+  "name": "bill-mfa-element",
+  "version": "1.0.0",
+  "description": "Obtiene un dispositivo MFA-trusted en BILL (rememberMeId + device) y lo envia a un Catch Webhook de Zapier.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:sandbox": "node server.js sandbox",
+    "start:live": "node server.js live"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
