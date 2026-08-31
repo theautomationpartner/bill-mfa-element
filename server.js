@@ -45,11 +45,16 @@ const GATEWAYS = {
   production: 'https://gateway.prod.bill.com/connect',
 };
 
-// Nota: BILL solo publica el bootloader de stage en su documentacion.
-// El de produccion se confirma con tu account manager de BILL.
+// Las dos URLs estan publicadas en https://developer.bill.com/docs/elements-overview
+//
+// No son intercambiables: cada bootloader sirve los widgets desde su propio
+// host y el bundle lleva los endpoints cableados. Verificado descargandolos:
+//   stage      -> gateway.stage.bill.com, api-stage.bill.com, tank.stage.bill.com
+//   produccion -> gateway.prod.bill.com,  api.bill.com,       tank.prod.bill.com
+// Un sessionId de produccion contra el widget de stage NUNCA valida.
 const BOOTLOADERS = {
   sandbox: 'https://widgets.stage.bdccdn.net/bootloader/index.js',
-  production: 'https://widgets.stage.bdccdn.net/bootloader/index.js',
+  production: 'https://apps.bill.com/bootloader/index.js',
 };
 
 const GATEWAY = process.env.BILL_GATEWAY_URL || GATEWAYS[ENV] || GATEWAYS.sandbox;
