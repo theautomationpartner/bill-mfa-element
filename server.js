@@ -13,6 +13,7 @@
 
 const http = require('node:http');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 // ---------------------------------------------------------------------------
@@ -61,15 +62,41 @@ const ORG_ID = process.env.BILL_ORG_ID || '';
 const ZAPIER_WEBHOOK_URL = process.env.ZAPIER_WEBHOOK_URL || '';
 const PORT = Number(process.env.PORT || 3000);
 
+// Donde se escriben los archivos de estado. En local es la carpeta del
+// proyecto; en un serverless (Vercel, Lambda) esa carpeta es de SOLO LECTURA
+// y hay que caer al directorio temporal. Si no se puede escribir en ningun
+// lado, la app sigue funcionando solo con memoria.
+const DATA_DIR = resolveDataDir();
+
+function resolveDataDir() {
+  const candidatos = [process.env.DATA_DIR, __dirname, os.tmpdir()];
+  for (const dir of candidatos) {
+    if (!dir) continue;
+    const probe = path.join(dir, '.write-probe-' + process.pid);
+    try {
+      fs.writeFileSync(probe, 'ok');
+      fs.unlinkSync(probe);
+      return dir;
+    } catch (err) {
+      /* no escribible: probamos el siguiente */
+    }
+  }
+  return null;
+}
+
 // Un store por perfil: el rememberMeId de sandbox no sirve en produccion.
-const STORE_FILE = path.join(__dirname, '.remember-me.' + PROFILE + '.json');
+const STORE_FILE = DATA_DIR && path.join(DATA_DIR, '.remember-me.' + PROFILE + '.json');
 
 // Bloqueo de seguridad. Cada POST /api/login manda un codigo nuevo al telefono
 // del usuario BILL: MAX_ATTEMPTS limita cuantos se pueden pedir sin acertar.
 // El contador vive en disco y NO en el browser, para que no se pueda burlar
 // borrando localStorage ni abriendo una ventana de incognito.
 const MAX_ATTEMPTS = Number(process.env.MAX_MFA_ATTEMPTS || 4);
-const ATTEMPTS_FILE = path.join(__dirname, '.attempts.' + PROFILE + '.json');
+const ATTEMPTS_FILE = DATA_DIR && path.join(DATA_DIR, '.attempts.' + PROFILE + '.json');
+
+// Espejo en memoria del contador. Es la fuente de verdad dentro del proceso:
+// el archivo solo lo hace sobrevivir a un reinicio, cuando hay disco.
+let attemptsMemo = null;
 
 // Sesion viva en memoria (nunca se persiste el sessionId a disco).
 const state = {
@@ -288,7 +315,10 @@ const server = http.createServer(async function (req, res) {
       log('  -> ' + out.status);
       return send(res, out.status, out.body);
     } catch (err) {
-      return send(res, 500, { error: String(err && err.stack ? err.stack : err) });
+      // El stack se queda en el log: al browser solo le llega un mensaje
+      // generico, para no exponer rutas ni detalles internos del servidor.
+      log('  EXCEPCION en ' + key + ': ' + String(err && err.stack ? err.stack : err));
+      return send(res, 500, { error: 'Internal server error. Check the server logs.' });
     }
   }
 
@@ -314,6 +344,7 @@ server.listen(PORT, function () {
   console.log('  Gateway      ' + GATEWAY);
   console.log('  Bootloader   ' + BOOTLOADER_URL);
   console.log('  Zapier       ' + (ZAPIER_WEBHOOK_URL || '(no configurado)'));
+  console.log('  Datos        ' + (DATA_DIR || 'solo memoria (disco de solo lectura)'));
   console.log('  Credenciales ' + (DEV_KEY && USERNAME && PASSWORD && ORG_ID ? 'OK' : 'FALTAN - revisa ' + (ENV_FILE_FOUND ? '.env.' + PROFILE : 'las variables de entorno')));
   console.log('');
 });
@@ -347,23 +378,41 @@ function readJsonBody(req) {
   });
 }
 
+// El store es una comodidad para depurar: el dato que importa es el que se
+// manda a Zapier. Nunca debe romper la peticion si el disco no acepta escrituras.
 function writeStore(record) {
-  fs.writeFileSync(STORE_FILE, JSON.stringify(record, null, 2), 'utf8');
+  if (!STORE_FILE) return;
+  try {
+    fs.writeFileSync(STORE_FILE, JSON.stringify(record, null, 2), 'utf8');
+  } catch (err) {
+    log('  aviso: no se pudo guardar el store (' + err.code + '). Se ignora.');
+  }
 }
 
 // --- Contador de intentos ---------------------------------------------------
 
 function readAttempts() {
-  try {
-    const data = JSON.parse(fs.readFileSync(ATTEMPTS_FILE, 'utf8'));
-    return { failed: Number(data.failed) || 0, lockedAt: data.lockedAt || null };
-  } catch (err) {
-    return { failed: 0, lockedAt: null };
+  if (attemptsMemo) return attemptsMemo;
+  if (ATTEMPTS_FILE) {
+    try {
+      const data = JSON.parse(fs.readFileSync(ATTEMPTS_FILE, 'utf8'));
+      attemptsMemo = { failed: Number(data.failed) || 0, lockedAt: data.lockedAt || null };
+      return attemptsMemo;
+    } catch (err) {
+      /* no existe todavia */
+    }
   }
+  return { failed: 0, lockedAt: null };
 }
 
 function writeAttempts(data) {
-  fs.writeFileSync(ATTEMPTS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  attemptsMemo = data; // el bloqueo vale aunque no haya disco
+  if (!ATTEMPTS_FILE) return;
+  try {
+    fs.writeFileSync(ATTEMPTS_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (err) {
+    log('  aviso: contador solo en memoria (' + err.code + ').');
+  }
 }
 
 function isLocked() {
@@ -388,7 +437,10 @@ function countAttempt() {
 
 /** Exito: se borra el contador y la app vuelve a estar disponible. */
 function resetAttempts() {
-  try { fs.unlinkSync(ATTEMPTS_FILE); } catch (err) { /* no existia */ }
+  attemptsMemo = null;
+  if (ATTEMPTS_FILE) {
+    try { fs.unlinkSync(ATTEMPTS_FILE); } catch (err) { /* no existia */ }
+  }
   log('  contador de intentos reiniciado');
 }
 
