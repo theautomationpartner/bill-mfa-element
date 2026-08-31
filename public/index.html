@@ -15,7 +15,8 @@
       font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
       color: #202124;
       box-sizing: border-box;
-      min-height: 100dvh;
+      min-height: 100vh;   /* respaldo: navegadores sin soporte de dvh */
+      min-height: 100dvh;  /* movil: descuenta la barra del navegador */
       margin: 0;
       padding: 32px 20px;
       display: flex;
