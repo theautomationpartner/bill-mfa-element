@@ -4,16 +4,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Get MFA Trusted to Bill.com</title>
-  <link rel="dns-prefetch preconnect" href="https://widgets.stage.bdccdn.net/" crossorigin />
-  <link rel="preload" as="script" href="https://widgets.stage.bdccdn.net/bootloader/index.js" />
   <style>
-    /* Solo lo necesario: el titulo, el boton y el spinner que vive dentro. */
-
     /* Una sola pantalla centrada en los dos ejes. dvh para que en movil
        cuente la barra del navegador y no quede el contenido corrido. */
     body {
       font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
       color: #202124;
+      background: #fff;
       box-sizing: border-box;
       min-height: 100vh;   /* respaldo: navegadores sin soporte de dvh */
       min-height: 100dvh;  /* movil: descuenta la barra del navegador */
@@ -27,8 +24,9 @@
     }
 
     h1 { font-size: 22px; font-weight: 600; margin: 0 0 24px; }
+    section { width: 100%; max-width: 420px; }
 
-    #btn-start {
+    .btn {
       /* min-width fijo: al pasar a "Loading…" el boton no cambia de tamano. */
       min-width: 170px;
       display: inline-flex;
@@ -45,11 +43,10 @@
       cursor: pointer;
       transition: background-color .15s ease;
     }
-    #btn-start:hover:not(:disabled) { background: #1765cc; }
-    #btn-start:focus-visible { outline: 2px solid #1a73e8; outline-offset: 3px; }
-
-    /* Estado de carga: gris, sin puntero de "clickeable", spinner visible. */
-    #btn-start[aria-busy="true"] { background: #9aa0a6; cursor: progress; }
+    .btn:hover:not(:disabled) { background: #1765cc; }
+    .btn:focus-visible { outline: 2px solid #1a73e8; outline-offset: 3px; }
+    .btn:disabled { background: #9aa0a6; cursor: not-allowed; }
+    .btn[aria-busy="true"] { cursor: progress; }
 
     .spinner {
       width: 15px; height: 15px; flex: none;
@@ -58,31 +55,37 @@
       border-radius: 50%;
       animation: spin .7s linear infinite;
     }
-    #btn-start:not([aria-busy="true"]) .spinner { display: none; }
+    .btn:not([aria-busy="true"]) .spinner { display: none; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    #error {
-      max-width: 420px;
-      margin: 18px 0 0;
-      color: #c5221f;
-    }
-    #error:empty { display: none; }
+    .error { max-width: 420px; margin: 14px auto 0; color: #c5221f; }
+    .error:empty { display: none; }
+    .muted { color: #5f6368; }
 
     #attempts { margin: 8px 0 0; font-size: 13px; color: #b06000; }
     #attempts:empty { display: none; }
 
-    /* El widget de BILL trae su propia caja; solo le damos el ancho. */
-    #your-div { width: 100%; max-width: 480px; }
-
-    /* Aviso bajo el boton: se lee antes de arrancar, que es cuando sirve. */
-    #hint {
-      max-width: 340px;
-      margin: 16px auto 0;
-      color: #5f6368;
-      font-size: 14px;
+    /* Paso del codigo */
+    #code-form { text-align: left; margin-top: 20px; }
+    #code-form label { display: block; font-weight: 500; margin-bottom: 6px; }
+    #code {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 12px 14px;
+      font: 22px/1.2 ui-monospace, Menlo, Consolas, monospace;
+      letter-spacing: .35em;
+      border: 1px solid #80868b;
+      border-radius: 6px;
     }
+    #code:focus { outline: 2px solid #1a73e8; outline-offset: 1px; border-color: #1a73e8; }
+    #code-form .btn { width: 100%; margin-top: 18px; }
+    .resend { margin: 16px 0 0; font-size: 14px; }
+    .link {
+      background: none; border: 0; padding: 0;
+      font: inherit; color: #1a73e8; text-decoration: underline; cursor: pointer;
+    }
+    .link:disabled { color: #80868b; cursor: default; text-decoration: none; }
 
-    #done, #locked, #failed { max-width: 420px; }
     #done h2, #locked h2, #failed h2 { font-size: 19px; font-weight: 600; margin: 0 0 8px; }
     #done p, #locked p, #failed p { margin: 0; color: #5f6368; }
     #failed-detail {
@@ -102,35 +105,85 @@
     .check { background: #e6f4ea; color: #137333; }
     .cross { background: #fce8e6; color: #c5221f; font-size: 26px; }
 
-    /* Transicion suave al cambiar de paso, en vez de un corte seco. */
-    .fade-out { opacity: 0; transition: opacity .18s ease; }
+    /* Modo prueba: imposible de confundir con el flujo real. */
+    #test-banner {
+      margin: 0 0 18px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: #fef7e0;
+      color: #8a4b00;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    #test-banner:empty { display: none; }
+
+    /* Traza paso a paso, solo en modo prueba. */
+    #debug {
+      width: 100%;
+      max-width: 640px;
+      margin-top: 28px;
+      text-align: left;
+      border-top: 1px solid #dadce0;
+      padding-top: 12px;
+    }
+    #debug h3 { font-size: 13px; margin: 0 0 6px; color: #5f6368; }
+    #debug-trace { font-size: 11px; color: #80868b; margin: 0 0 8px; word-break: break-all; }
+    #debug-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 40vh;
+      overflow: auto;
+      font: 11px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    }
+    #debug-list li { padding: 2px 0; border-bottom: 1px dashed #eee; word-break: break-word; }
+    #debug-list .warn { color: #b06000; }
+    #debug-list .error { color: #c5221f; font-weight: 600; margin: 0; }
+
     .fade-in { animation: fade-in .22s ease both; }
     @keyframes fade-in { from { opacity: 0; transform: translateY(4px); } }
 
     @media (prefers-reduced-motion: reduce) {
       .spinner { animation-duration: 1.6s; }
-      .fade-in, .fade-out { animation: none; transition: none; }
+      .fade-in { animation: none; }
     }
   </style>
 </head>
 <body>
 
-<!-- Paso 1: titulo + boton. Desaparece cuando el widget esta listo. -->
+<p id="test-banner"></p>
+
+<!-- Paso 1: titulo + boton. -->
 <section id="intro">
   <h1>Get MFA Trusted to Bill.com</h1>
-  <button id="btn-start" type="button">
+  <button id="btn-start" class="btn" type="button">
     <span class="spinner" aria-hidden="true"></span>
-    <span id="btn-label">Get Started</span>
+    <span class="label">Get Started</span>
   </button>
-  <!-- Critico: si no se marca la casilla, BILL no emite rememberMeId
-       y no hay nada que mandarle a Zapier. -->
-  <p id="hint">Please, check “Remember this device” before you get into the code.</p>
   <p id="attempts"></p>
-  <p id="error" role="alert"></p>
+  <p id="intro-error" class="error" role="alert"></p>
 </section>
 
-<!-- Paso 2: aqui adentro renderiza BILL. -->
-<div id="your-div"></div>
+<!-- Paso 2: el codigo. Lo valida el servidor contra BILL: aqui no hay
+     widget, ni iframe, ni fingerprint del navegador. -->
+<section id="code-step" hidden>
+  <h1>Enter your 6-digit code</h1>
+  <p id="code-sent" class="muted"></p>
+  <form id="code-form" novalidate>
+    <label for="code">Verification code</label>
+    <!-- one-time-code: iOS/Android ofrecen el codigo del SMS en el teclado. -->
+    <input id="code" name="code" type="text" inputmode="numeric"
+           autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required />
+    <p id="code-error" class="error" role="alert"></p>
+    <button id="btn-verify" class="btn" type="submit">
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="label">Verify</span>
+    </button>
+  </form>
+  <p class="resend muted">
+    Didn't get a code? <button id="btn-resend" class="link" type="button">Send code again</button>
+  </p>
+</section>
 
 <!-- Paso 3: confirmacion. -->
 <section id="done" hidden>
@@ -152,346 +205,409 @@
   <div class="cross" aria-hidden="true">&times;</div>
   <h2>Locked for security</h2>
   <p>
-    The verification code failed too many times, so this app was locked
+    Too many verification codes were requested, so this app was locked
     to protect the Bill.com account. Please contact TAP support.
   </p>
+</section>
+
+<!-- Modo prueba: la misma traza que llega a Vercel, en pantalla. -->
+<section id="debug" hidden>
+  <h3>Test mode trace</h3>
+  <p id="debug-trace"></p>
+  <ol id="debug-list"></ol>
 </section>
 
 <script type="module">
   const $ = (id) => document.getElementById(id);
 
   // ---------------------------------------------------------------------
-  // Pasos de la UI. En pantalla hay siempre uno solo, centrado.
+  // Bitacora -> POST /api/client-log -> logs de Vercel.
+  //
+  // Cada paso de la app se reporta al servidor con un traceId por carga de
+  // pagina. NUNCA viajan: el codigo MFA ni el token del flujo (ver redactar()).
   // ---------------------------------------------------------------------
 
-  // El spinner vive DENTRO del boton: mismo boton, gris y con "Loading…".
-  function setLoading(on) {
-    const btn = $('btn-start');
+  const TRACE_ID = (crypto.randomUUID ? crypto.randomUUID()
+    : Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 36);
+
+  // Modo prueba: se entra con ?test=<clave> y se sale con ?test=off. La clave
+  // se quita de la barra de direcciones para que no aparezca en capturas.
+  const TEST_KEY = (() => {
+    const params = new URLSearchParams(location.search);
+    let k = params.get('test');
+    try {
+      if (k === 'off') { sessionStorage.removeItem('billTestKey'); k = null; }
+      else if (k) sessionStorage.setItem('billTestKey', k);
+      else k = sessionStorage.getItem('billTestKey');
+    } catch (err) { /* sin storage: el modo dura lo que dure la pagina */ }
+    if (params.has('test')) {
+      params.delete('test');
+      const qs = params.toString();
+      history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+    }
+    return k || null;
+  })();
+
+  const SECRETO = /pass|session|token|secret|remembermeid|deviceid|^device$|devkey|otp|^flow$|^code$/i;
+
+  // Copia segura de cualquier payload: claves sensibles -> solo si venian,
+  // un numero de 6 digitos suelto -> se asume codigo MFA y se tapa.
+  function redactar(value, depth = 0) {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string') {
+      if (/^\d{6}$/.test(value.trim())) return '[code]';
+      return value.length > 500 ? value.slice(0, 500) + '…' : value;
+    }
+    if (typeof value !== 'object') return value;
+    if (value instanceof Error) return { error: String(value.message || value) };
+    if (depth > 4) return '[…]';
+    if (Array.isArray(value)) return value.slice(0, 20).map((v) => redactar(v, depth + 1));
+    const out = {};
+    for (const [k, v] of Object.entries(value).slice(0, 40)) {
+      out[k] = SECRETO.test(k) ? (v ? '[redacted]' : v) : redactar(v, depth + 1);
+    }
+    return out;
+  }
+
+  const T0 = performance.now();
+  const colaLog = [];
+  const trazaLocal = [];
+  let flushTimer = null;
+  let debugVisible = false;
+
+  function track(step, data, level = 'info') {
+    const ev = {
+      at: new Date().toISOString(),
+      ms: Math.round(performance.now() - T0),
+      step,
+      level,
+      data: data === undefined ? undefined : redactar(data),
+    };
+    colaLog.push(ev);
+    trazaLocal.push(ev);
+    if (debugVisible) pintarEvento(ev);
+    // Los errores salen ya: si la pestana se cierra justo despues, no se pierden.
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flushLog, level === 'error' ? 0 : 1500);
+  }
+
+  function flushLog() {
+    while (colaLog.length) {
+      const body = JSON.stringify({
+        traceId: TRACE_ID,
+        mode: TEST_KEY ? 'test' : 'main',
+        ua: navigator.userAgent,
+        events: colaLog.splice(0, 50),
+      });
+      // sendBeacon sobrevive al cierre de la pestana; fetch keepalive de respaldo.
+      let enviado = false;
+      try {
+        enviado = navigator.sendBeacon &&
+          navigator.sendBeacon('/api/client-log', new Blob([body], { type: 'application/json' }));
+      } catch (err) { /* sigue con fetch */ }
+      if (!enviado) {
+        fetch('/api/client-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: true,
+        }).catch(() => {});
+      }
+    }
+  }
+
+  function pintarEvento(ev) {
+    const li = document.createElement('li');
+    li.className = ev.level;
+    const datos = ev.data === undefined ? '' : ' ' + JSON.stringify(ev.data);
+    li.textContent = '+' + (ev.ms / 1000).toFixed(1) + 's  ' + ev.step +
+      (datos.length > 400 ? datos.slice(0, 400) + '…' : datos);
+    const lista = $('debug-list');
+    lista.appendChild(li);
+    lista.scrollTop = lista.scrollHeight;
+  }
+
+  function activarDebug() {
+    debugVisible = true;
+    $('debug-trace').textContent = 'traceId ' + TRACE_ID + ' (search this in Vercel logs)';
+    $('debug').hidden = false;
+    trazaLocal.forEach(pintarEvento);
+  }
+
+  addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { track('page.hidden'); flushLog(); }
+    else track('page.visible');
+  });
+  addEventListener('pagehide', () => flushLog());
+  addEventListener('error', (e) => track('js.error', {
+    message: e.message, source: e.filename, line: e.lineno,
+  }, 'error'));
+  addEventListener('unhandledrejection', (e) => track('js.unhandledRejection', {
+    reason: String(e.reason && e.reason.message ? e.reason.message : e.reason),
+  }, 'error'));
+
+  track('page.load', {
+    path: location.pathname,
+    viewport: innerWidth + 'x' + innerHeight,
+    lang: navigator.language,
+  });
+
+  // ---------------------------------------------------------------------
+  // Pantallas. En pantalla hay siempre una sola, centrada.
+  // ---------------------------------------------------------------------
+
+  const PANTALLAS = ['intro', 'code-step', 'done', 'failed', 'locked'];
+
+  function mostrarPantalla(id) {
+    for (const p of PANTALLAS) $(p).hidden = p !== id;
+    $(id).classList.remove('fade-in');
+    void $(id).offsetWidth; // reinicia la animacion
+    $(id).classList.add('fade-in');
+  }
+
+  function setBusy(btn, on, labelOn) {
     btn.disabled = on;
     btn.setAttribute('aria-busy', String(on));
-    $('btn-label').textContent = on ? 'Loading…' : 'Get Started';
-  }
-
-  // Error dentro del paso 1. Si el paso 1 ya no esta en pantalla, el mensaje
-  // seria invisible: en ese caso se muestra la pantalla de fallo completa.
-  function showError(message) {
-    if ($('intro').hidden) return mostrarFallo('Something went wrong', message, '');
-    $('error').textContent = message;
-    setLoading(false);
-  }
-
-  function ocultar(el) {
-    el.classList.add('fade-out');
-    setTimeout(() => { el.hidden = true; el.classList.remove('fade-out'); }, 180);
-  }
-
-  function mostrar(el) {
-    el.hidden = false;
-    el.classList.add('fade-in');
-  }
-
-  // Marca que el flujo ya termino en alguna pantalla final, para que el
-  // vigilante del widget no pise ese resultado.
-  let resuelto = false;
-
-  // Titulo y boton se van; queda el widget solo, centrado.
-  function mostrarWidget() {
-    // El aviso vive dentro de #intro, asi que se va con el.
-    ocultar($('intro'));
-    $('your-div').classList.add('fade-in');
+    const label = btn.querySelector('.label');
+    if (!btn.dataset.label) btn.dataset.label = label.textContent;
+    label.textContent = on ? (labelOn || 'Loading…') : btn.dataset.label;
   }
 
   function mostrarFinal(titulo, texto) {
-    resuelto = true;
-    if (!$('intro').hidden) ocultar($('intro'));
-    $('your-div').hidden = true;
-    $('failed').hidden = true;
+    track('screen.done', { title: titulo });
     $('done-title').textContent = titulo;
     $('done-text').textContent = texto;
-    mostrar($('done'));
+    mostrarPantalla('done');
   }
 
-  // Fallo con cruz roja. Existe para que NUNCA quede la pantalla en blanco:
-  // si el widget no llega a pintarse, aqui se dice por que.
   function mostrarFallo(titulo, texto, detalle) {
-    resuelto = true;
-    if (!$('intro').hidden) ocultar($('intro'));
-    $('your-div').hidden = true;
-    $('done').hidden = true;
+    track('screen.failed', { title: titulo, detail: detalle || '' }, 'error');
     $('failed-title').textContent = titulo;
     $('failed-text').textContent = texto;
     $('failed-detail').textContent = detalle || '';
-    mostrar($('failed'));
+    mostrarPantalla('failed');
   }
 
-  // Bloqueo por seguridad: no queda nada que se pueda pulsar.
   function mostrarBloqueo() {
-    resuelto = true;
-    if (!$('intro').hidden) ocultar($('intro'));
-    $('your-div').hidden = true;
-    $('done').hidden = true;
-    $('failed').hidden = true;
-    mostrar($('locked'));
-    if (bootloader) { try { bootloader.destroy('element1'); } catch (err) {} }
+    track('screen.locked', undefined, 'warn');
+    mostrarPantalla('locked');
+  }
+
+  function mostrarIntentos(left, max) {
+    $('attempts').textContent = left < max ? left + ' of ' + max + ' attempts remaining.' : '';
+  }
+
+  // ---------------------------------------------------------------------
+  // API
+  // ---------------------------------------------------------------------
+
+  async function api(pathname, body) {
+    const headers = { 'X-Trace-Id': TRACE_ID };
+    if (TEST_KEY) headers['X-Test-Key'] = TEST_KEY;
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    track('api.request', { path: pathname });
+    try {
+      const res = await fetch(pathname, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      // La respuesta va a la traza tal cual (el token del flujo, redactado).
+      track('api.response', { path: pathname, status: res.status, data }, res.ok ? 'info' : 'error');
+      return { ok: res.ok, status: res.status, data };
+    } catch (err) {
+      track('api.network', { path: pathname, error: String(err && err.message || err) }, 'error');
+      return { ok: false, status: 0, data: { error: 'network' } };
+    }
+  }
+
+  // Errores del servidor -> texto para el usuario y que hacer despues.
+  //   retry:   el mismo codigo puede corregirse (se queda en el formulario)
+  //   resend:  hace falta un SMS nuevo
+  //   restart: hay que empezar de cero
+  function explicar(error) {
+    switch (error) {
+      case 'incorrect_code': return { text: 'That code is not correct. Check it and try again.', next: 'retry' };
+      case 'invalid_code_format': return { text: 'Enter the 6 digits of the code.', next: 'retry' };
+      case 'code_expired': return { text: 'That code has expired. Tap “Send code again” to get a new one.', next: 'resend' };
+      case 'too_many_code_attempts': return { text: 'Too many incorrect codes. Tap “Send code again” to get a new one.', next: 'resend' };
+      case 'sms_limit_reached': return { text: 'Bill.com has sent too many codes. Wait a few minutes and try again.', next: 'wait' };
+      case 'flow_expired':
+      case 'session_expired': return { text: 'This verification expired. Please start again.', next: 'restart' };
+      case 'network': return { text: 'Network error. Check your connection and try again.', next: 'retry' };
+      default: return null;
+    }
   }
 
   // ---------------------------------------------------------------------
   // Flujo
   // ---------------------------------------------------------------------
 
-  async function api(pathname, body) {
-    const res = await fetch(pathname, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    return { ok: res.ok, status: res.status, data: await res.json().catch(() => ({})) };
+  let flow = null; // token cifrado del servidor: el browser no puede leerlo
+
+  const configRes = await api('/api/config');
+  const config = configRes.data;
+
+  if (config.mode === 'test') {
+    $('test-banner').textContent = 'TEST MODE · code goes to ' + (config.testUser || 'test user');
+    document.title = '[TEST] ' + document.title;
+  } else if (config.env === 'sandbox') {
+    // Despliegue dev: que nadie lo confunda con el de produccion.
+    $('test-banner').textContent = 'SANDBOX';
+    document.title = '[SANDBOX] ' + document.title;
+  }
+  if (config.showTrace) activarDebug();
+
+  if (configRes.status === 403) {
+    try { sessionStorage.removeItem('billTestKey'); } catch (err) {}
+    mostrarFallo('Invalid test link',
+      'This test link is not valid. Open the app without the test parameter, or ask TAP for a new link.', '');
+  } else if (!configRes.ok) {
+    mostrarFallo('Could not load the app',
+      'Please reload the page, and contact TAP support if it keeps happening.', 'status ' + configRes.status);
+  } else if (config.locked) {
+    mostrarBloqueo();
+  } else {
+    mostrarIntentos(config.attemptsLeft, config.maxAttempts);
   }
 
-  const config = (await api('/api/config')).data;
-  let session = null;
-  let bootloader = null;
+  function pasoCodigo(data) {
+    flow = data.flow;
+    $('code-sent').textContent = data.last4
+      ? 'We sent a code to the phone ending in ' + data.last4 + '.'
+      : 'We sent a code to your phone.';
+    $('code').value = '';
+    $('code-error').textContent = '';
+    mostrarPantalla('code-step');
+    $('code').focus();
+    enfriarReenvio();
+  }
 
-  // El widget guarda aqui la confianza del navegador. Si estas claves existen,
-  // hace el step-up solo y NO dibuja nada. Las limpiamos para que el desafio
-  // se muestre siempre y emita un rememberMeId nuevo.
-  const CLAVES_BILL = ['_rememberMeIdBill', '_deviceIdBill'];
-
-  // 1. sessionId (POST /v3/login del lado servidor, con las credenciales del perfil).
-  //    Las credenciales nunca llegan aqui: el browser solo recibe el sessionId.
-  //
-  //    OJO: cada login manda un SMS al telefono del usuario BILL y gasta un
-  //    intento. Por eso `session` solo se reemplaza cuando la sesion nueva ya
-  //    existe (nunca se deja en null a medias) y los reintentos estan topados.
-  const MAX_RELOGIN = 1;
-  let reloginsHechos = 0;
-
-  async function renovarSesion() {
-    const login = await api('/api/login', {});
-    if (login.status === 423) {
-      const err = new Error('locked');
-      err.locked = true;
-      throw err;
+  // Errores comunes a inicio y reenvio. Devuelve true si ya mostro pantalla.
+  function manejarErrorEnvio(res) {
+    const err = res.data.error;
+    if (res.status === 423) { mostrarBloqueo(); return true; }
+    if (err === 'mfa_setup_required') {
+      mostrarFallo('MFA phone not set up',
+        'This Bill.com user has no MFA phone yet. Sign in once at bill.com to set it up, then try again.', '');
+      return true;
     }
-    if (!login.ok) throw new Error(login.data.error || 'POST /v3/login failed');
-    session = login.data;
-    return session.sessionId;
+    if (err === 'login_rejected' || err === 'not_configured' || err === 'unexpected_mfa_status' || err === 'phone_invalid') {
+      mostrarFallo('Bill.com could not start the verification',
+        'Please contact TAP support.', [err, res.data.billCode || res.data.mfaStatus].filter(Boolean).join(' · '));
+      return true;
+    }
+    return false;
   }
-
-  async function getSessionId() {
-    if (session) return session.sessionId;
-    return renovarSesion();
-  }
-
-  // 2. Config del bootloader: getSessionId es lo que BILL invoca para autenticar.
-  const billBootConfig = {
-    key: config.devKey,
-    getSessionId: () => getSessionId(),
-    // Nunca puede lanzar: si lanza, el widget corta con get-user-context-failed
-    // y se queda en bucle sin pintar nada.
-    getUserContext: () => (session
-      ? { userId: session.userId, orgId: session.orgId }
-      : { userId: null, orgId: null }),
-    onAuthFailed: async () => {
-      if (reloginsHechos >= MAX_RELOGIN) {
-        // Reintentar en bucle mandaria un SMS por vuelta y agotaria los intentos.
-        console.error('[bill] onAuthFailed repetido: se corta para no gastar intentos');
-        mostrarFallo('Bill.com rejected the session',
-          'Bill.com did not accept the session for this environment. ' +
-          'Please contact TAP support.',
-          detalleDiagnostico());
-        throw new Error('auth failed twice');
-      }
-      reloginsHechos += 1;
-      console.warn('[bill] onAuthFailed: renovando sessionId (' + reloginsHechos + ')');
-      return renovarSesion();
-    },
-    onEvent: (event) => onWidgetEvent(event),
-  };
 
   $('btn-start').onclick = async () => {
-    $('error').textContent = '';
-    setLoading(true);
-    try {
-      await getSessionId();
-
-      for (const k of CLAVES_BILL) localStorage.removeItem(k);
-
-      const mod = await import(config.bootloaderUrl);
-      bootloader = mod.init(billBootConfig);
-      if (!bootloader) throw new Error('bootloader init() returned null');
-
-      bootloader.register({ id: 'element1', name: 'mfa', outputs: { onEvent: onWidgetEvent } });
-      await bootloader.render('element1', '#your-div');
-
-      // render() puede resolver sin que BILL haya pintado nada. Se espera a
-      // ver contenido real antes de retirar el titulo y el boton: si se
-      // ocultan antes de tiempo, el usuario se queda mirando una pagina vacia.
-      const pintado = await esperarWidgetPintado();
-      if (resuelto) return;          // el widget ya resolvio por evento
-
-      if (pintado) {
-        mostrarWidget();
-      } else {
-        let motivo;
-        if (fingerprintFallo) {
-          motivo = 'Bill.com did not authorize this page, so the verification ' +
-            'widget could not start. Please contact TAP support.';
-        } else if (desajusteEntorno()) {
-          motivo = 'This app is running against Bill.com production, but the ' +
-            'production widget URL is not configured. Please contact TAP support.';
-        } else {
-          motivo = 'The verification widget did not load. Please reload the page, ' +
-            'and contact TAP support if it keeps happening.';
-        }
-        mostrarFallo('Bill.com could not load', motivo, detalleDiagnostico());
-      }
-    } catch (err) {
-      if (err && err.locked) return mostrarBloqueo();
-      showError(String(err && err.message ? err.message : err));
-    }
+    $('intro-error').textContent = '';
+    setBusy($('btn-start'), true);
+    track('start.click');
+    const res = await api('/api/mfa/start', {});
+    setBusy($('btn-start'), false);
+    if (res.ok) return pasoCodigo(res.data);
+    if (manejarErrorEnvio(res)) return;
+    const e = explicar(res.data.error);
+    $('intro-error').textContent = e ? e.text
+      : 'Something went wrong. Please try again, and contact TAP support if it keeps happening.';
   };
 
-  // ¿BILL pinto algo dentro del contenedor? Puede montar en shadow DOM o en un
-  // iframe, asi que no alcanza con mirar innerHTML: se mide tambien el alto.
-  function esperarWidgetPintado(timeoutMs) {
-    const limite = Date.now() + (timeoutMs || 10000);
-    const el = $('your-div');
-    return new Promise((resolve) => {
-      (function revisar() {
-        if (resuelto) return resolve(false);
-        const alto = el.getBoundingClientRect().height;
-        if (el.childElementCount > 0 && (alto > 20 || el.querySelector('iframe'))) {
-          return resolve(true);
-        }
-        if (Date.now() > limite) return resolve(false);
-        setTimeout(revisar, 200);
-      })();
-    });
-  }
-
-  // El widget de stage no puede validar un sessionId de produccion: es la
-  // causa mas probable de que el Element no arranque en un deploy real.
-  function desajusteEntorno() {
-    return config.env === 'production' &&
-      String(config.bootloaderUrl || '').includes('.stage.');
-  }
-
-  // Pistas para soporte, sin exponer nada sensible.
-  function detalleDiagnostico() {
-    const partes = [
-      'origin ' + location.origin,
-      'env ' + config.env,
-      'bootloader ' + (desajusteEntorno() ? 'STAGE (mismatch)' : 'ok'),
-      'events ' + (eventosVistos.join(',') || 'none'),
-    ];
-    if (ultimoErrorWidget) partes.push('last ' + ultimoErrorWidget);
-    return partes.join(' · ');
-  }
-
-  // Si el servidor ya esta bloqueado, no se muestra ni el boton.
-  if (config.locked) {
-    mostrarBloqueo();
-  } else if (config.attemptsLeft < config.maxAttempts) {
-    $('attempts').textContent =
-      config.attemptsLeft + ' of ' + config.maxAttempts + ' attempts remaining.';
-  }
-
-  // El bootloader emite los eventos del widget como CustomEvent.
-  window.addEventListener('bill-bootloader:element1', (e) => {
-    const d = e.detail || {};
-    onWidgetEvent(d.payload && d.payload.name ? d.payload : d);
-  });
-  window.addEventListener('element1', (e) => onWidgetEvent(e.detail));
-
-  // El deviceId lo emite el fingerprinting del bootloader, antes del MFA.
-  // Lo guardamos como respaldo por si mfaSuccess llega sin el: sin deviceId
-  // el rememberMeId no sirve para abrir una sesion trusted.
-  let fingerprintDeviceId = null;
-  let fingerprintFallo = false;
-  let erroresWidget = 0;
-  let ultimoErrorWidget = null;
-  const eventosVistos = [];
-
-  window.addEventListener('bill-bootloader', (e) => {
-    const d = e.detail || {};
-    console.log('[bill] ' + d.name, d.payload);
-    if (d.name) eventosVistos.push(d.name);
-    if (d.name === 'fingerprintSuccess' && d.payload) {
-      fingerprintDeviceId = d.payload.deviceId || null;
-    }
-    if (d.name === 'fingerprintError') {
-      // BILL no autorizo el origen de esta pagina. El widget no va a pintar,
-      // asi que se avisa en pantalla completa y no en el paso 1, que para
-      // entonces puede estar ya oculto.
-      fingerprintFallo = true;
-      console.error('[bill] fingerprintError: origen no autorizado', d.payload);
-    }
-    // El widget emite `error` en bucle cuando no puede arrancar. Sin esto la
-    // pagina se queda en blanco mientras la consola se llena de errores.
-    if (d.name === 'error') {
-      erroresWidget += 1;
-      const p = d.payload || {};
-      ultimoErrorWidget = p.error || p.msg || 'unknown';
-      if (erroresWidget >= 3 && !resuelto) {
-        mostrarFallo('Bill.com could not start',
-          'The verification widget reported an error and could not start. ' +
-          'Please contact TAP support.',
-          ultimoErrorWidget + ' · ' + detalleDiagnostico());
-      }
-    }
+  $('code').addEventListener('input', () => {
+    // Solo digitos, aunque se pegue "066 353" o el teclado meta espacios.
+    const limpio = $('code').value.replace(/\D/g, '').slice(0, 6);
+    if (limpio !== $('code').value) $('code').value = limpio;
+    $('code-error').textContent = '';
   });
 
-  const seen = new Set();
+  $('code-form').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const code = $('code').value.trim();
+    if (!/^\d{6}$/.test(code)) {
+      $('code-error').textContent = 'Enter the 6 digits of the code.';
+      return;
+    }
+    setBusy($('btn-verify'), true, 'Verifying…');
+    track('verify.submit');
+    const res = await api('/api/mfa/verify', { flow, code });
+    setBusy($('btn-verify'), false);
 
-  async function onWidgetEvent(event) {
-    if (!event || !event.name) return;
-    const key = event.name + '|' + JSON.stringify(event.payload || {});
-    if (seen.has(key)) return;
-    seen.add(key);
-
-    const payload = event.payload || {};
-    console.log('[bill] evento ' + event.name, payload);
-    eventosVistos.push(event.name);
-
-    // El widget no va a dibujar nada: sin este aviso quedaria la pantalla vacia.
-    if (event.name === 'mfaReady' && payload.required === false) {
-      mostrarFinal('Already MFA-trusted',
-        'This session is already trusted, so there is no code to verify.');
+    if (res.ok) {
+      const hasta = new Date(res.data.expiresAt).toLocaleDateString(undefined,
+        { year: 'numeric', month: 'long', day: 'numeric' });
+      if (res.data.zapier && res.data.zapier.sent) {
+        return mostrarFinal('Your device is MFA-trusted',
+          'Bill.com payments can now be automated until ' + hasta +
+          ' (' + res.data.rememberDays + ' days). You can close this page.');
+      }
+      return mostrarFallo('Trusted, but not delivered',
+        'Bill.com trusted this device, but it was not sent to Zapier. Please contact TAP support.',
+        JSON.stringify(res.data.zapier || {}));
     }
 
-    // 3. MFA resuelto: mandamos device + rememberMeId al webhook de Zapier.
-    if (event.name === 'mfaSuccess') {
-      if (!payload.rememberMeId) {
-        mostrarFinal('Almost there', 'The verification succeeded.');
-        return;
-      }
-      // Si el evento no trajo deviceId, usamos el del fingerprinting.
-      const envio = Object.assign({}, payload);
-      if (!envio.deviceId && fingerprintDeviceId) {
-        envio.deviceId = fingerprintDeviceId;
-        console.log('[bill] deviceId tomado del fingerprint:', fingerprintDeviceId);
-      }
-
-      const { ok, data } = await api('/api/remember-me', envio);
-      console.log('[bill] /api/remember-me ->', ok, data);
-      const sent = ok && data.zapier && data.zapier.sent;
-      if (sent) {
-        mostrarFinal('Your device is MFA-trusted',
-          'The device and rememberMeId were sent to Zapier. You can close this page.');
-      } else {
-        mostrarFallo('Trusted, but not delivered',
-          'Bill.com trusted this device, but it was not sent to Zapier. ' +
-          'Please contact TAP support.',
-          data.error ? data.error + ' ' + (data.detalle || '')
-                     : JSON.stringify(data.zapier || data));
-      }
+    if (res.data.error === 'not_trusted') {
+      return mostrarFallo('Bill.com did not trust this device',
+        'The code was accepted, but Bill.com did not grant a trusted session. Please contact TAP support.',
+        'trusted ' + res.data.trusted + ' · mfaStatus ' + res.data.mfaStatus);
     }
+    const e = explicar(res.data.error);
+    if (!e) {
+      return mostrarFallo('Something went wrong',
+        'Please try again, and contact TAP support if it keeps happening.',
+        [res.data.error, res.data.billCode].filter(Boolean).join(' · ') || 'status ' + res.status);
+    }
+    if (e.next === 'restart') {
+      flow = null;
+      mostrarPantalla('intro');
+      $('intro-error').textContent = e.text;
+      return;
+    }
+    $('code-error').textContent = e.text;
+    if (e.next === 'retry') $('code').select();
+  };
+
+  // "Send code again" con espera, para no gastar intentos por doble toque.
+  let reenvioTimer = null;
+  function enfriarReenvio(segundos = 30) {
+    const btn = $('btn-resend');
+    clearInterval(reenvioTimer);
+    let s = segundos;
+    btn.disabled = true;
+    btn.textContent = 'Send code again (' + s + 's)';
+    reenvioTimer = setInterval(() => {
+      s -= 1;
+      if (s > 0) { btn.textContent = 'Send code again (' + s + 's)'; return; }
+      clearInterval(reenvioTimer);
+      btn.disabled = false;
+      btn.textContent = 'Send code again';
+    }, 1000);
   }
 
-  window.addEventListener('beforeunload', () => {
-    if (bootloader) { try { bootloader.destroy('element1'); } catch (err) {} }
-  });
+  $('btn-resend').onclick = async () => {
+    track('resend.click');
+    $('btn-resend').disabled = true;
+    const res = await api('/api/mfa/resend', { flow });
+    if (res.ok) {
+      flow = res.data.flow;
+      $('code').value = '';
+      $('code-error').textContent = '';
+      $('code-sent').textContent = 'We sent a new code' +
+        (res.data.last4 ? ' to the phone ending in ' + res.data.last4 : '') + '.';
+      $('code').focus();
+      return enfriarReenvio();
+    }
+    if (manejarErrorEnvio(res)) return;
+    const e = explicar(res.data.error);
+    if (e && e.next === 'restart') {
+      flow = null;
+      mostrarPantalla('intro');
+      $('intro-error').textContent = e.text;
+      return;
+    }
+    $('code-error').textContent = e ? e.text : 'Could not send a new code. Please try again.';
+    enfriarReenvio(10);
+  };
 </script>
 </body>
 </html>
