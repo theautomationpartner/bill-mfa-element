@@ -58,6 +58,29 @@
     .btn:not([aria-busy="true"]) .spinner { display: none; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* Boton del payload de ejemplo: secundario, para no competir con Get Started. */
+    #sample { margin-top: 28px; padding-top: 20px; border-top: 1px solid #dadce0; }
+    .btn-secondary { background: #fff; color: #1a73e8; border: 1px solid #1a73e8; }
+    .btn-secondary:hover:not(:disabled) { background: #e8f0fe; }
+    .btn-secondary:disabled { background: #fff; color: #9aa0a6; border-color: #dadce0; }
+    .btn-secondary .spinner { border-color: rgba(26, 115, 232, .3); border-top-color: #1a73e8; }
+    .sample-hint { font-size: 13px; margin: 10px 0 0; }
+    #sample-result { font-size: 13px; margin: 10px 0 0; }
+    #sample-result:empty { display: none; }
+    #sample-result.ok { color: #137333; }
+    #sample-result.fail { color: #c5221f; }
+    #sample-payload {
+      text-align: left;
+      font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
+      background: #f8f9fa;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin: 10px 0 0;
+      overflow: auto;
+      white-space: pre;
+    }
+
     .error { max-width: 420px; margin: 14px auto 0; color: #c5221f; }
     .error:empty { display: none; }
     .muted { color: #5f6368; }
@@ -162,6 +185,19 @@
   </button>
   <p id="attempts"></p>
   <p id="intro-error" class="error" role="alert"></p>
+
+  <!-- Solo con SHOW_TRACE=true en el server: payload de ejemplo al Catch Hook
+       del entorno, para mapear campos en el Zap sin pasar por Bill.com. -->
+  <div id="sample" hidden>
+    <button id="btn-sample" class="btn btn-secondary" type="button">
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="label">Send sample to Zapier</span>
+    </button>
+    <p class="muted sample-hint">Sends a fake payload (<code>"sample": true</code>) with the real
+      structure. Bill.com is not contacted and no code is sent.</p>
+    <p id="sample-result" role="status"></p>
+    <pre id="sample-payload" hidden></pre>
+  </div>
 </section>
 
 <!-- Paso 2: el codigo. Lo valida el servidor contra BILL: aqui no hay
@@ -458,6 +494,7 @@
     document.title = '[SANDBOX] ' + document.title;
   }
   if (config.showTrace) activarDebug();
+  if (config.samplePayload) $('sample').hidden = false;
 
   if (configRes.status === 403) {
     try { sessionStorage.removeItem('billTestKey'); } catch (err) {}
@@ -512,6 +549,33 @@
     const e = explicar(res.data.error);
     $('intro-error').textContent = e ? e.text
       : 'Something went wrong. Please try again, and contact TAP support if it keeps happening.';
+  };
+
+  $('btn-sample').onclick = async () => {
+    const destino = config.mode === 'test' ? 'TEST' : config.env === 'production' ? 'PRODUCTION' : 'SANDBOX';
+    // En produccion el hook alimenta el Zap de pagos: confirmacion explicita.
+    if (!confirm('Send a SAMPLE payload ("sample": true) to the ' + destino +
+      ' Zapier webhook?\n\nMake sure the Zap filters out sample == true before it uses the data.')) return;
+    const out = $('sample-result');
+    out.className = '';
+    out.textContent = '';
+    setBusy($('btn-sample'), true, 'Sending…');
+    track('sample.click', { destino });
+    const res = await api('/api/zapier/sample', {});
+    setBusy($('btn-sample'), false);
+    if (res.data.payload) {
+      $('sample-payload').textContent = JSON.stringify(res.data.payload, null, 2);
+      $('sample-payload').hidden = false;
+    }
+    if (res.ok) {
+      out.className = 'ok';
+      out.textContent = 'Sample sent to the ' + destino + ' webhook (Zapier ' + res.data.zapier.status + ').';
+    } else {
+      out.className = 'fail';
+      out.textContent = res.data.error === 'sample_cooldown'
+        ? 'Wait ' + res.data.retryInSeconds + ' s before sending another sample.'
+        : 'Could not send the sample: ' + (res.data.error || JSON.stringify(res.data.zapier || {}) || 'status ' + res.status);
+    }
   };
 
   $('code').addEventListener('input', () => {

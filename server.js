@@ -97,6 +97,15 @@ const TEST_MODE_AVAILABLE = Boolean(TEST_MODE_KEY && ACCOUNTS.test.username && A
 // de la rama dev (sandbox); en produccion debe quedar sin definir.
 const SHOW_TRACE = process.env.SHOW_TRACE === 'true';
 
+// Boton "Send sample to Zapier": manda al Catch Hook del entorno un payload
+// con la MISMA estructura que el real (sample: true), sin pasar por BILL, para
+// mapear campos en el Zap. Va atado a SHOW_TRACE (solo la variable de entorno,
+// no el modo prueba): con el boton visible, cualquiera con la URL podria
+// inyectar un ejemplo en el Zap. El endpoint lo exige tambien, no solo la UI.
+const SAMPLE_PAYLOAD_ENABLED = SHOW_TRACE;
+const SAMPLE_COOLDOWN_MS = 30 * 1000;
+const lastSampleAt = { main: 0, test: 0 };
+
 // --- Flujo MFA entre peticiones ---------------------------------------------
 // En serverless, "enviar SMS" y "validar codigo" pueden caer en instancias
 // distintas: el estado del desafio no puede vivir en memoria. Viaja en el
@@ -249,6 +258,7 @@ const routes = {
         // usuario (y telefono) va el codigo.
         testUser: mode === 'test' ? maskEmail(account.username) : undefined,
         showTrace: mode === 'test' || SHOW_TRACE,
+        samplePayload: SAMPLE_PAYLOAD_ENABLED && Boolean(account.webhook),
         zapierConfigured: Boolean(account.webhook),
         credentialsConfigured: Boolean(DEV_KEY && account.username && account.password && ORG_ID),
         locked: attempts.failed >= MAX_ATTEMPTS,
@@ -403,7 +413,6 @@ const routes = {
     log('  verificacion del par: trusted=' + trusted + ' mfaStatus=' + mfaStatus);
 
     const capturedAt = new Date();
-    const expiresAt = new Date(capturedAt.getTime() + REMEMBER_ME_DAYS * 86400000);
 
     if (!(trusted && mfaStatus === 'COMPLETE')) {
       writeStore(mode, {
@@ -416,18 +425,12 @@ const routes = {
       };
     }
 
-    // Exactamente lo que el Zap necesita para el relogin MFA-trusted.
-    const record = {
+    const record = buildZapierRecord(mode, account, {
       device: flow.device,
       rememberMeId: rememberMeId,
-      capturedAt: capturedAt.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-    };
-    // En modo prueba el Zap tiene que poder distinguir de quien es el par.
-    if (mode === 'test') {
-      record.mode = 'test';
-      record.username = account.username;
-    }
+      capturedAt: capturedAt,
+      sample: false,
+    });
 
     writeStore(mode, Object.assign({}, record, { environment: ENV, verified: true }));
 
@@ -441,7 +444,31 @@ const routes = {
     };
   },
 
-  // 4. Bitacora del navegador -> logs de Vercel. Una linea JSON por evento,
+  // 4. Payload de ejemplo al Catch Hook del entorno, sin pasar por BILL. Misma
+  //    estructura que el real (buildZapierRecord), con sample: true y valores
+  //    que no sirven para loguearse: el Zap debe filtrar sample == false.
+  'POST /api/zapier/sample': async function (req) {
+    const mode = req.mode;
+    const account = ACCOUNTS[mode];
+    if (!SAMPLE_PAYLOAD_ENABLED) return { status: 404, body: { error: 'sample_disabled' } };
+    if (!account.webhook) return { status: 409, body: { error: 'zapier_not_configured' } };
+
+    const wait = lastSampleAt[mode] + SAMPLE_COOLDOWN_MS - Date.now();
+    if (wait > 0) return { status: 429, body: { error: 'sample_cooldown', retryInSeconds: Math.ceil(wait / 1000) } };
+    lastSampleAt[mode] = Date.now();
+
+    const record = buildZapierRecord(mode, account, {
+      device: 'SAMPLE' + newDeviceId().slice(6),
+      rememberMeId: '!SAMPLE-not-a-real-rememberMeId-' + crypto.randomBytes(12).toString('hex'),
+      capturedAt: new Date(),
+      sample: true,
+    });
+    const zapier = await sendToZapier(mode, account.webhook, record);
+    // El ejemplo no tiene secretos: se devuelve para verlo en pantalla.
+    return { status: zapier.sent ? 200 : 502, body: { zapier: zapier, payload: record } };
+  },
+
+  // 5. Bitacora del navegador -> logs de Vercel. Una linea JSON por evento,
   //    filtrable por traceId. El front ya redacta secretos antes de mandar.
   'POST /api/client-log': async function (req) {
     const b = req.body || {};
@@ -488,6 +515,28 @@ function challengeErrorResponse(challenge) {
   if (challenge.code === 'BDC_1354') return { status: 409, body: { error: 'phone_invalid' } };
   if (challenge.status === 401) return { status: 410, body: { error: 'session_expired' } };
   return { status: 502, body: { error: 'challenge_failed', billCode: challenge.code } };
+}
+
+/**
+ * El payload que recibe el Catch Hook. Unica fuente de la estructura: la usan
+ * el envio real y el de ejemplo, asi lo mapeado en el Zap siempre coincide.
+ */
+function buildZapierRecord(mode, account, f) {
+  const record = {
+    device: f.device,
+    rememberMeId: f.rememberMeId,
+    capturedAt: f.capturedAt.toISOString(),
+    expiresAt: new Date(f.capturedAt.getTime() + REMEMBER_ME_DAYS * 86400000).toISOString(),
+    environment: ENV,
+    // true = payload de ejemplo del boton; el Zap debe filtrar sample == false.
+    sample: f.sample,
+  };
+  // En modo prueba el Zap tiene que poder distinguir de quien es el par.
+  if (mode === 'test') {
+    record.mode = 'test';
+    record.username = account.username;
+  }
+  return record;
 }
 
 async function sendToZapier(mode, webhook, record) {
